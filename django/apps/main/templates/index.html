@@ -20,14 +20,6 @@
       <div class="d-flex">
         <div class="bg-secondary text-light rounded p-2 mb-2">Hi! How can I help you today?</div>
       </div>
-      <div class="d-flex justify-content-end">
-        <div class="bg-success text-white rounded p-2 mb-2">Tell me a joke!</div>
-      </div>
-      <div class="d-flex">
-        <div class="bg-secondary text-light rounded p-2 mb-2">
-          Why don't scientists trust atoms? Because they make up everything!
-        </div>
-      </div>
     </div>
     <!-- Chat input -->
     <form method="post" action="/get-chatbot-response/">
@@ -84,17 +76,17 @@
       const form = document.querySelector("form");
       const chatContainer = document.getElementById("chatContainer");
       const sendBtn = document.getElementById("sendBtn");
-      
+
       form.addEventListener("submit", (e) => {
         e.preventDefault();
-        
+
         const chatInput = document.getElementById("chatInput");
         const userMessage = chatInput.value.trim();
 
         if (userMessage) {
           addChatBubble(userMessage, "user");
         } else {
-          alert("Please type some message")
+          alert("Please type some message");
           return;
         }
 
@@ -104,37 +96,40 @@
         // Convert FormData to a plain object for easier handling
         const formDataObject = {};
         formData.forEach((value, key) => {
-            formDataObject[key] = value;
+          formDataObject[key] = value;
         });
 
         fetch(form.action, {
-            method: form.method,
-            body: JSON.stringify(formDataObject),
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': csrfToken
-            }
+          method: form.method,
+          body: JSON.stringify(formDataObject),
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken
+          }
         })
-        .then(response => {
+          .then(response => {
             if (!response.ok) {
-                throw new Error('Network response was not ok');
+              throw new Error('Network response was not ok');
             }
             return response.json();
-        })
-        .then(data => {
-          chatInput.value = "";
+          })
+          .then(data => {
+            data = data.response;
+            chatInput.value = "";
             console.log(data);
-            // Display the response in a suitable way, e.g., using a modal, alert, or updating the DOM
-            alert(JSON.stringify(data, null, 2));
-        })
-        .catch(error => {
+            if (Array.isArray(data)) {
+              data.forEach(item => addResponseBubble(item));
+            } else {
+              addChatBubble("Unexpected response format.", "response");
+            }
+          })
+          .catch(error => {
             console.error('Error:', error);
-            // Handle errors, e.g., display an error message to the user
-            alert('An error occurred. Please try again later.');
-        });
+            addChatBubble('An error occurred. Please try again later.', "error");
+          });
       });
 
-      // Add a new chat bubble
+      // Add a new chat bubble for user or system messages
       const addChatBubble = (message, type) => {
         const bubble = document.createElement("div");
         bubble.className = `d-flex ${type === "user" ? "justify-content-end" : ""}`;
@@ -146,6 +141,34 @@
         chatContainer.appendChild(bubble);
         chatContainer.scrollTop = chatContainer.scrollHeight; // Scroll to the bottom
       };
+
+      // Add a new chat bubble for the structured response
+      const addResponseBubble = (response) => {
+        const bubble = document.createElement("div");
+        bubble.className = "d-flex";
+    
+        // Build the sources content
+        const sourcesContent = response.sources.map(source => `
+            <div class="bg-secondary text-light rounded p-2 mb-2">
+              <strong>Book:</strong> ${source.book}<br>
+              <strong>Chapter:</strong> ${source.chapter_number} - ${source.chapter_name}<br>
+              <strong>Verse/Number:</strong> ${source.verse_or_hadith_number}
+            </div>
+        `).join("");
+    
+        // Build the bubble content
+        bubble.innerHTML = `
+            <div class="bg-light text-dark rounded p-3 mb-3">
+              <strong>Answer:</strong> ${response.answer}
+              ${sourcesContent}
+            </div>
+        `;
+    
+        // Append bubble to chat container
+        chatContainer.appendChild(bubble);
+        chatContainer.scrollTop = chatContainer.scrollHeight; // Scroll to the bottom
+    };
+    
     </script>
   </body>
 </html>

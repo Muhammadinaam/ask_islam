@@ -1,232 +1,218 @@
-import pickle
+import os
 from os import path
 
-import pandas as pd
-from langchain_community.llms import HuggingFacePipeline, OpenAI
 from langchain_community.vectorstores import FAISS
+import openai
+import pandas as pd
+import numpy as np
 from langdetect import detect
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
+openai.api_key = OPENAI_API_KEY
 
 islamic_chatbot = None
-
-# Dictionary for model configuration
-MODEL_CONFIG = {
-    "huggingface": {
-        "model_name": "EleutherAI/gpt-neo-1.3B",
-        "type": "huggingface",
-        "config": {
-            "max_length": 512,
-            "temperature": 0.2
-        }
-    },
-    "openai": {
-        "model_name": "text-davinci-003",
-        "type": "openai",
-        "config": {}
-    },
-    "free_openai": {
-        "model_name": "gpt-3.5-turbo",  # Example for a free OpenAI model
-        "type": "openai",
-        "config": {}
-    }
-}
 
 
 def get_islamic_chatbot():
     global islamic_chatbot
-
     if islamic_chatbot is None:
         current_directory = path.dirname(__file__)
         islamic_books_path = path.join(
             current_directory,
-            '../../../data/islamic_books.csv')
+            '../../../data/islamic_books.csv'
+        )
         islamic_chatbot = IslamicChatbot(islamic_books_path)
     return islamic_chatbot
 
 
 class IslamicChatbot:
-    def __init__(self, csv_file, model_key="huggingface"):
-        """
-        Initialize the chatbot with the provided model type and model name.
-        :param model_key: The key for selecting a model configuration from the 
-        MODEL_CONFIG dictionary.
-        """
+    def __init__(self, csv_file):
         self.csv_file = csv_file
-
-        # Model key for selecting from MODEL_CONFIG dictionary
-        self.model_key = model_key
-        # Get the model configuration from the dictionary
-        self.model_config = MODEL_CONFIG[model_key]
-        # Model name to be used
-        self.model_name = self.model_config["model_name"]
-        # Model type (huggingface or openai)
-        self.model_type = self.model_config["type"]
-        self.embedding_model = SentenceTransformer(
-            'all-MiniLM-L6-v2')  # Sentence Transformers
+        self.chat_history = []  # Initialize chat history
         self.load_data()
 
     def load_data(self):
-        """
-        Load data, create embeddings, and initialize the FAISS vector store.
-        """
-        # Load the CSV data into a dataframe
         self.df = pd.read_csv(self.csv_file)
+        if 'english_text' not in self.df.columns:
+            self.df['english_text'] = None
+        if 'embedding' not in self.df.columns:
+            self.df['embedding'] = None
 
-        # Combine adjacent verses based on the context size
-        texts = []
-        metadatas = []
-        embeddings = []
+        texts, embeddings, metadatas = [], [], []
+
         for idx, row in self.df.iterrows():
-            print("dfindex: " + str(idx))
-            context_size = 5 if row["book"] == "Quran" else 0
+            print(idx)
+            arabic_text = row['arabic_text']
 
-            # Collect previous verses
-            previous_verses = []
-            for i in range(1, context_size + 1):
-                if idx - i >= 0 and self.df.iloc[idx - i]['book'] == "Quran":
-                    previous_verses.insert(
-                        0, self.df.iloc[idx - i]['arabic_text'])
+            # Generate or use existing English translation
+            if pd.isna(row['english_text']):
+                self.df.at[idx, 'english_text'] = self.translate_to_english(
+                    arabic_text)
 
-            # Collect next verses
-            next_verses = []
-            for i in range(1, context_size + 1):
-                if (idx + i < len(self.df) and
-                        self.df.iloc[idx + i]['book'] == "Quran"):
-                    next_verses.append(self.df.iloc[idx + i]['arabic_text'])
+            english_text = self.df.at[idx, 'english_text']
 
-            # Combine previous, current, and next verses
-            current_verse = row['arabic_text']
-            combined_text = " ".join(
-                previous_verses + [current_verse] + next_verses)
+            # Generate or use existing embedding
+            if pd.isna(row['embedding']) and english_text:
+                embedding = self.generate_embedding(english_text)
+                self.df.at[idx, 'embedding'] = str(embedding)
+            else:
+                embedding = eval(row['embedding']) if not pd.isna(
+                    row['embedding']) else None
 
-            # Compute the embedding for the combined text
-            embedding = self.embedding_model.encode(combined_text).tolist()
+            if english_text and embedding:
+                texts.append(english_text)
+                embeddings.append(embedding)
+                metadatas.append({
+                    "book": row['book'],
+                    "chapter_number": row['chapter_number'],
+                    "chapter_name": row['chapter_name'],
+                    "verse_or_hadith_number": row['verse_or_hadith_number'],
+                    "embedding": embedding
+                })
 
-            # Append the text, metadata, and embedding
-            texts.append(combined_text)
-            embeddings.append(embedding)
-            metadatas.append({
-                "book": row['book'],
-                "chapter_number": row['chapter_number'],
-                "chapter_name": row['chapter_name'],
-                "verse_or_hadith_number": row['verse_or_hadith_number'],
-            })
+            # Save progress to CSV after processing each row
+            self.df.to_csv(self.csv_file, index=False)
 
-        # Initialize FAISS vector store
-        text_embeddings = list(zip(texts, embeddings))
-        self.vector_store = FAISS.from_embeddings(
-            text_embeddings=text_embeddings,
-            embedding=self.embedding_model,
-            metadatas=metadatas
+        # Create FAISS vector store
+        if texts and embeddings:
+            text_embeddings = list(zip(texts, embeddings))
+            self.vector_store = FAISS.from_embeddings(
+                embedding=None,
+                text_embeddings=text_embeddings,
+                metadatas=metadatas
+            )
+        else:
+            self.vector_store = None
+
+    def translate_to_english(self, text):
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": ("You are a helpful assistant "
+                                "that translates text to English. "
+                                "Response should only contain translation "
+                                "and no extra text.")},
+                {
+                    "role": "user",
+                    "content": f"Translate this text to English: {text}"
+                }
+            ],
         )
+        return response.choices[0].message.content.strip()
 
-    def save_state(
-        self,
-        file_path="vector_store.pkl",
-        faiss_path="faiss_index"
-    ):
-        """
-        Save the FAISS vector store and metadata to files.
-        """
-        # Save FAISS index
-        self.vector_store.save_local(faiss_path)
-
-        # Save metadata and additional information
-        with open(file_path, "wb") as f:
-            pickle.dump({
-                "metadata": self.df[[
-                    'book',
-                    'chapter_number',
-                    'chapter_name',
-                    'verse_or_hadith_number']].to_dict('records')
-            }, f)
-        print(f"State saved to {file_path} and FAISS index to {faiss_path}")
-
-    def load_state(
-        self,
-        file_path="vector_store.pkl",
-        faiss_path="faiss_index"
-    ):
-        """
-        Load the FAISS vector store and metadata from files.
-        """
-        # Load FAISS index
-        self.vector_store = FAISS.load_local(
-            faiss_path, embeddings=self.embedding_model)
-
-        # Load metadata
-        with open(file_path, "rb") as f:
-            state = pickle.load(f)
-            self.df = pd.DataFrame(state["metadata"])
-        print("State loaded from "
-              f"{file_path} and FAISS index from {faiss_path}")
+    def generate_embedding(self, text):
+        response = openai.embeddings.create(
+            input=text,
+            model="text-embedding-ada-002",
+            encoding_format="float"
+        )
+        return response.data[0].embedding
 
     def detect_language(self, text):
         try:
             return detect(text)
         except Exception:
-            return "en"  # Default to English if detection fails
+            return "unknown"
 
     def query(self, user_query):
-        """
-        Process user queries with dynamic context retrieval.
-        :param user_query: The user's question.
-        """
-        # Detect user's language
         user_language = self.detect_language(user_query)
 
-        # Convert user query to embeddings
-        user_query_embedding = self.embedding_model.encode(user_query).tolist()
+        # Generate embedding for the user query
+        user_query_embedding = self.generate_embedding(user_query)
 
-        # Use FAISS to retrieve top 3 relevant entries with query embedding
-        relevant_texts = self.vector_store.similarity_search_by_vector(
-            user_query_embedding, k=3
-        )
+        # Perform similarity search in the vector store
+        if self.vector_store:
+            relevant_texts = self.find_relevant_texts(user_query_embedding)
 
-        # Select LLM based on model type
-        if self.model_type == "huggingface":
-            hf_pipeline = pipeline(
-                "text-generation",
-                model=self.model_name,
-                **self.model_config["config"]
-            )
-            llm = HuggingFacePipeline(pipeline=hf_pipeline)
-        elif self.model_type == "openai" or self.model_type == "free_openai":
-            llm = OpenAI(model=self.model_name)
+            response = []
 
-        # Prepare response with explanations
-        response = []
-        for result in relevant_texts:
-            # Extract metadata
-            metadata = result.metadata
-            book = metadata.get('book', 'Unknown')
-            chapter_number = metadata.get('chapter_number', 'Unknown')
-            chapter_name = metadata.get('chapter_name', 'Unknown')
-            verse_or_hadith_number = metadata.get(
-                'verse_or_hadith_number', 'Unknown')
+            sources = []
+            combined_text = ''
+            for result in relevant_texts:
+                metadata = result.metadata
+                book = metadata.get('book', 'Unknown')
+                chapter_number = metadata.get('chapter_number', 'Unknown')
+                chapter_name = metadata.get('chapter_name', 'Unknown')
+                verse_or_hadith_number = metadata.get(
+                    'verse_or_hadith_number', 'Unknown')
+                text = result.page_content
+                combined_text = f'{combined_text} | {text}'
 
-            # Retrieve the actual text
-            combined_text = result.page_content
+                sources.append({
+                    "book": book,
+                    "chapter_number": chapter_number,
+                    "chapter_name": chapter_name,
+                    "verse_or_hadith_number": verse_or_hadith_number,
+                })
 
-            # Create a contextual prompt for the LLM
             prompt = (
-                "The following text is from an Islamic book. "
-                f"Explain it in {user_language} "
-                "considering the "
-                f"context provided:\n\n{combined_text}\n\nExplanation:"
+                f"Answer this question: \"{user_query}\" "
+                f"in language of the question."
+                f"considering only this text: {combined_text}. Answer:"
             )
 
-            # Generate explanation using selected LLM
-            explanation = llm(prompt)
-
-            # Append response
+            explanation = self.llm(prompt)
             response.append({
-                "book": book,
-                "chapter_number": chapter_number,
-                "chapter_name": chapter_name,
-                "verse_or_hadith_number": verse_or_hadith_number,
+                "sources": sources,
                 "answer": explanation
             })
 
-        return response
+            # Update chat history
+            self.chat_history.append({
+                "user_query": user_query,
+                "response": explanation
+            })
+
+            return response
+        else:
+            return "Vector store is not initialized."
+
+    def find_relevant_texts(self, user_query_embedding):
+        # Perform similarity search with k=10
+        results = self.vector_store.similarity_search_by_vector(
+            user_query_embedding, k=10)
+
+        # Normalize embeddings (if not already normalized)
+        user_query_embedding = user_query_embedding / np.linalg.norm(
+            user_query_embedding)
+
+        similarity_threshold = 0.8
+        filtered_results = [
+            result for result in results
+            if np.dot(
+                result.metadata['embedding'],
+                user_query_embedding
+            ) > similarity_threshold
+        ]
+
+        # Retrieve the top 3 results from the filtered list
+        strict_results = filtered_results[:3]
+        return strict_results
+
+    def llm(self, prompt):
+        try:
+            messages = [
+                {
+                    "role": "assistant",
+                    "content": "You are a helpful assistant."
+                }
+            ]
+            for history in self.chat_history:
+                messages.append(
+                    {"role": "user", "content": history["user_query"]})
+                messages.append(
+                    {"role": "assistant", "content": history["response"]})
+            messages.append({"role": "user", "content": prompt})
+
+            completion = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=150
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            print(f"Error with LLM: {e}")
+            return "Error generating response."
